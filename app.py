@@ -12,7 +12,7 @@ import logic
 
 # --- UI設定 ---
 st.set_page_config(page_title="Crack Batch Labeler", layout="wide")
-st.title("🏗️ ひび割れ一括解析・アノテーションツール")
+st.title("🏗️ Degradation Analysis & Annotation Tool")
 
 # --- セッション状態の初期化 ---
 if 'file_index' not in st.session_state:
@@ -24,28 +24,28 @@ if 'uploaded_files_list' not in st.session_state:
 
 # --- サイドバー ---
 with st.sidebar:
-    st.header("🔑 認証・設定")
+    st.header("🔑 Setting and model Loading")
     api_key = st.text_input("Gemini API Key", type="password")
-    model_id = st.selectbox("モデル", ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"])
-    prompt_type = st.radio("検出種類", ["ひび割れ", "欠損・剥離", "その他"])
-    min_area = st.number_input("最小ポリゴン面積(px)", value=10)
+    model_id = st.selectbox("Model", ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"])
+    prompt_type = st.radio("Degradation Type", ["Cracks", "Chipped/Delaminated", "Eflorescence/Other"])
+    min_area = st.number_input("Minimum polygon area (px)", value=10)
 
     st.divider()
-    st.header("📊 進行状況")
+    st.header("📊 Current status")
     if st.session_state.uploaded_files_list:
         total = len(st.session_state.uploaded_files_list)
         current = st.session_state.file_index + 1
-        st.write(f"進捗: {current} / {total}")
+        st.write(f"Progress: {current} / {total}")
         st.progress(current / total)
         
         # フォルダ内の移動ボタン
         col_prev, col_next = st.columns(2)
         with col_prev:
-            if st.button("⬅️ 前へ", disabled=(st.session_state.file_index == 0)):
+            if st.button("⬅️ Previous", disabled=(st.session_state.file_index == 0)):
                 st.session_state.file_index -= 1
                 st.rerun()
         with col_next:
-            if st.button("次へ ➡️", disabled=(st.session_state.file_index == total - 1)):
+            if st.button("Next ➡️", disabled=(st.session_state.file_index == total - 1)):
                 st.session_state.file_index += 1
                 st.rerun()
 
@@ -56,29 +56,34 @@ with st.sidebar:
 # ひび割れ認識
 PROMPT_FOR_NANOBANANA_V1 = """
 写真にうつる建築物の表面を解析し，ひび割れを特定してください。
+特定した箇所のアスペクト比が0.5未満の細長いものや、2.0を超える細長いものはひび割れの可能性が高いです。
 直線的なタイルやブロックの目地，建材の稜線，塗料の剥がれ部，異種材料の境界部分はひび割れではありません。
 建材表面の幾何学的な模様や陰影はひび割れではありません。
-特定したひび割れの上に、鮮明な赤色(透過率80%)の線を，ひび割れの太さに応じて描画した画像を生成してください。
+特定したひび割れの上に、鮮明な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
 元の画像と赤色の線のみで構成された画像を返してください。
 """
 # 欠損・はがれ
 PROMPT_FOR_NANOBANANA_V2 = """
 写真にうつる建築物の表面を解析し，建材の欠損部や剥離部を特定してください。
-欠損部や剥離部は寸法の縦横のアスペクト比0.5～2.0の範囲です．
-アスペクト比が0.5未満の細長いものや、2.0を超える細長いものはひび割れの可能性が高いですが、今回は対象外としてください。
+欠損部や剥離部は特定した箇所の縦横のアスペクト比0.5～2.0の範囲です．
+特定した箇所のアスペクト比が0.5未満の細長いものや、2.0を超える細長いものは除外してください。
 直線的なタイルやブロックの目地，建材の稜線，異種材料の境界部分は欠損部や剥離部ではありません。
 建材表面の幾何学的な模様や陰影は欠損部や剥離部ではありません。
-特定した欠損部や剥離部の上に、鮮明な赤色(透過率80%)を描画した画像を生成してください。
+特定した欠損部や剥離部の上に、鮮明な赤色を描画した画像を生成してください。
 元の画像と赤色の描画領域のみで構成された画像を返してください。
 
 """
-# 
+# その他（今回は主にエフロレッセンスを想定）
 PROMPT_FOR_NANOBANANA_V3 = """
-写真にうつる建築物の表面を解析し，ひび割れを特定してください。
-直線的なタイルやブロックの目地，建材の稜線，塗料の剥がれ部，異種材料の境界部分はひび割れではありません。
-建材表面の幾何学的な模様や陰影はひび割れではありません。
-特定したひび割れの上に、鮮明な赤色(透過率80%)の線を，ひび割れの太さに応じて描画した画像を生成してください。
-元の画像と赤色の線のみで構成された画像を返してください。
+Analyze the surface of the building in the photograph, detect cracks, and identify the areas of white efflorescence around them.
+Efflorescence is a planar area with an aspect ratio between 0.5 and 2.0.
+Exclude elongated areas with an aspect ratio less than 0.5 or greater than 2.0.
+Linear tile or block joints, building material edges, peeling paint, and boundaries between different materials are not efflorescence.
+Geometric patterns and shading on the building material surface are irrelevant.
+Efflorescence has a white-based color, independent of the original building surface.
+Furthermore, efflorescence is a planar spread adhering to the area around the cracks.
+Generate an image with the efflorescence areas vividly colored red.
+Return an image consisting only of the original image and the red-colored areas.
 """
  
 
@@ -91,7 +96,7 @@ PROMPT_MAP = {
 
 
 # --- 1. ファイル一括読み込み ---
-uploaded_files = st.file_uploader("解析する画像をまとめて選択してください", 
+uploaded_files = st.file_uploader("Load images to analyze", 
                                   type=["jpg", "png", "jpeg"], 
                                   accept_multiple_files=True)
 
@@ -107,7 +112,7 @@ if st.session_state.uploaded_files_list:
     current_file = st.session_state.uploaded_files_list[st.session_state.file_index]
     filename = current_file.name
     
-    st.subheader(f"📂 処理中: {filename}")
+    st.subheader(f"📂 in progress: {filename}")
     
     col_l, col_r = st.columns([1, 1])
     
@@ -116,12 +121,12 @@ if st.session_state.uploaded_files_list:
     w, h = pil_img.size
     
     with col_l:
-        st.image(pil_img, caption="オリジナル画像", use_column_width=True)
-        if st.button("🚀 この画像を 解析", use_container_width=True):
+        st.image(pil_img, caption="Original Image", use_column_width=True)
+        if st.button("🚀 Analyze it", use_container_width=True):
             if not api_key:
-                st.error("APIキーを入力してください")
+                st.error("Please enter your API key")
             else:
-                with st.spinner("解析中..."):
+                with st.spinner("Analyzing..."):
                     current_file.seek(0)
                     traced_data = logic.get_gemini_traced_image(
                         api_key, current_file.read(), 
@@ -130,7 +135,7 @@ if st.session_state.uploaded_files_list:
                     )
                     # 結果を一時保存
                     st.session_state.results_dict[filename] = {"traced_data": traced_data}
-                    st.success("解析完了！右側で修正してください。")
+                    st.success("Analysis completed! Please make corrections on the right side.")
 
     with col_r:
         if filename in st.session_state.results_dict and st.session_state.results_dict[filename].get("traced_data"):
@@ -147,7 +152,7 @@ if st.session_state.uploaded_files_list:
                 drawing_mode="polygon",
                 key=f"canvas_{filename}", # ファイルごとにキーを変えるのがコツ
             )
-            st.caption("誤検知エリアをマウスで囲んでください")
+            st.caption("Mark erroneous detection areas with your mouse")
 
             # 描画済みマスク（アルファチャンネル）を取得するヘルパー
             def get_exclusion_mask(image_data, target_w, target_h):
@@ -166,9 +171,9 @@ if st.session_state.uploaded_files_list:
                     traced_np = np.array(traced_pil.convert("RGB").resize((w, h), Image.LANCZOS))
                     orig_np = np.array(pil_img.convert("RGB"))
                     result_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
-                    st.image(Image.fromarray(result_np.astype(np.uint8)), caption="誤検知除外後プレビュー", use_column_width=True)
+                    st.image(Image.fromarray(result_np.astype(np.uint8)), caption="Preview after exclusion", use_column_width=True)
 
-            if st.button("✅ この画像の結果を確定して保存", use_container_width=True):
+            if st.button("✅ Confirm and save results for this image", use_container_width=True):
                 # 除外マスクを traced_data に適用してから YOLO 変換
                 traced_bytes_to_use = res["traced_data"]
                 if canvas_result.image_data is not None:
@@ -192,17 +197,17 @@ if st.session_state.uploaded_files_list:
                     "vis_img": vis_img,
                     "completed": True
                 })
-                st.success(f"{filename} のラベルを保存しました！")
+                st.success(f"{filename} 's labels were saved successfully!")
 
 # --- 3. 一括書き出しエリア ---
 if st.session_state.results_dict:
     st.divider()
-    st.subheader("📦 一括書き出し")
+    st.subheader("📦 Bulk Export")
     
     completed_count = sum(1 for r in st.session_state.results_dict.values() if r.get("completed"))
-    st.write(f"確定済み画像: {completed_count} / {len(st.session_state.uploaded_files_list)}")
+    st.write(f"Completed Images: {completed_count} / {len(st.session_state.uploaded_files_list)}")
 
-    if st.button("📁 全ての確定済みデータをZIPでダウンロード", use_container_width=True):
+    if st.button("📁 Download All Completed Data as ZIP", use_container_width=True):
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for fname, data in st.session_state.results_dict.items():
@@ -217,7 +222,7 @@ if st.session_state.results_dict:
                     # zf.writestr(f"images/{fname}", ...) 
 
         st.download_button(
-            label="🔥 ZIPをダウンロード",
+            label="🔥 Download ZIP",
             data=zip_buffer.getvalue(),
             file_name="yolo_dataset_all.zip",
             mime="application/zip",
