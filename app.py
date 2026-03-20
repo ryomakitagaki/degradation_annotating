@@ -10,17 +10,30 @@ from streamlit_drawable_canvas import st_canvas
 
 import logic
 
+# --- ヘルパー関数 (エラー回避のため外側に定義) ---
+def get_exclusion_mask(image_data, target_w, target_h):
+    """canvas の image_data から除外マスクを target サイズで作成する"""
+    if image_data is None:
+        return None
+    # 4チャンネル目(アルファチャンネル)が描画された部分
+    alpha = image_data[:, :, 3]
+    if alpha.max() == 0:
+        return None
+    # OpenCVでリサイズ。描画領域を255(白)にする
+    mask = cv2.resize(alpha, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+    return mask
+
 # --- UI設定 ---
 st.set_page_config(page_title="Crack Batch Labeler", layout="wide")
 st.title("🏗️ Degradation Analysis & Annotation Tool")
 
 # --- セッション状態の初期化 ---
 if 'file_index' not in st.session_state:
-    st.session_state.file_index = 0             # 現在表示中のファイル番号
+    st.session_state.file_index = 0
 if 'results_dict' not in st.session_state:
-    st.session_state.results_dict = {}         # 解析結果の保存用 {ファイル名: {yolo_txt, vis_img, traced_data}}
+    st.session_state.results_dict = {}
 if 'uploaded_files_list' not in st.session_state:
-    st.session_state.uploaded_files_list = []  # アップロードされたファイル群
+    st.session_state.uploaded_files_list = []
 
 # --- サイドバー ---
 with st.sidebar:
@@ -38,7 +51,6 @@ with st.sidebar:
         st.write(f"Progress: {current} / {total}")
         st.progress(current / total)
         
-        # フォルダ内の移動ボタン
         col_prev, col_next = st.columns(2)
         with col_prev:
             if st.button("⬅️ Previous", disabled=(st.session_state.file_index == 0)):
@@ -49,170 +61,149 @@ with st.sidebar:
                 st.session_state.file_index += 1
                 st.rerun()
 
+# 基本プロンプト定義
 
-
-# プロンプト定義
-# 内容
-# ひび割れ認識
-PROMPT_FOR_NANOBANANA_V1 = """
+V1="""
 写真にうつる建築物の表面を解析し，ひび割れを特定してください。
-特定した箇所のアスペクト比が0.5未満の細長いものや、2.0を超える細長いものはひび割れの可能性が高いです。
 直線的なタイルやブロックの目地，建材の稜線，塗料の剥がれ部，異種材料の境界部分はひび割れではありません。
 建材表面の幾何学的な模様や陰影はひび割れではありません。
-特定したひび割れの上に、鮮明な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
+特定したひび割れの上に、RGB(255, 0, 0)の純粋な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
 元の画像と赤色の線のみで構成された画像を返してください。
 """
-# 欠損・はがれ
-PROMPT_FOR_NANOBANANA_V2 = """
-写真にうつる建築物の表面を解析し，建材の欠損部や剥離部を特定してください。
-特定した欠損部や剥離部の上に、鮮明な赤色を描画した画像を生成してください。
-元の画像と赤色の描画領域のみで構成された画像を返してください。
-
+V2="""
+写真に写る建築物の表面を解析し，欠損部や剥離部をすべて特定し、
+その範囲にRGB(255, 0, 0)の純粋な赤色を描画した画像を返してください。
 """
-# その他（今回は主にエフロレッセンスを想定）
-PROMPT_FOR_NANOBANANA_V3 = """
-エフロレッセンスの箇所を赤く塗ってください。
-"""
- 
 
-# プロンプト定義
+V3="""
+写真に写る建築物の表面を解析し，エフロレッセンス（白華現象，efflorescence）が見られる領域をすべて特定し、
+その範囲にRGB(255, 0, 0)の純粋な赤色で塗りつぶした画像を返してください。
+"""
+
+
 PROMPT_MAP = {
-    "ひび割れ": PROMPT_FOR_NANOBANANA_V1,
-    "欠損・はがれ": PROMPT_FOR_NANOBANANA_V2,
-    "その他": PROMPT_FOR_NANOBANANA_V3
+    "Cracks": V1,
+    "Chipped/Delaminated": V2,
+    "Eflorescence/Other": V3
 }
 
-
-# --- 1. ファイル一括読み込み ---
-uploaded_files = st.file_uploader("Load images to analyze", 
-                                  type=["jpg", "png", "jpeg"], 
-                                  accept_multiple_files=True)
-
-# 新しいファイルがアップロードされたらリストを更新
+# --- 1. ファイル読み込み ---
+uploaded_files = st.file_uploader("Load images", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 if uploaded_files:
-    if not st.session_state.uploaded_files_list or (len(uploaded_files) != len(st.session_state.uploaded_files_list)):
+    if len(uploaded_files) != len(st.session_state.uploaded_files_list):
         st.session_state.uploaded_files_list = uploaded_files
         st.session_state.file_index = 0
-        st.session_state.results_dict = {} # リセット
+        st.session_state.results_dict = {}
 
 # --- 2. 個別処理エリア ---
 if st.session_state.uploaded_files_list:
     current_file = st.session_state.uploaded_files_list[st.session_state.file_index]
     filename = current_file.name
-    
     st.subheader(f"📂 in progress: {filename}")
     
     col_l, col_r = st.columns([1, 1])
-    
-    # 画像の読み込み
     pil_img = Image.open(current_file)
     w, h = pil_img.size
     
     with col_l:
         st.image(pil_img, caption="Original Image", use_column_width=True)
-        if st.button("🚀 Analyze it", use_container_width=True):
+        
+        st.write("---")
+        st.markdown("#### 🤖 Refinement Prompt")
+        refine_key = f"refine_text_{filename}"
+        user_refinement = st.text_area(
+            "Add instructions for better detection:",
+            placeholder="Ex: 'Ignore the vertical tile joints on the right.'",
+            key=refine_key
+        )
+        
+        if st.button("🚀 Analyze / Refine with Gemini", use_container_width=True):
             if not api_key:
-                st.error("Please enter your API key")
+                st.error("Please enter API key")
             else:
                 with st.spinner("Analyzing..."):
+                    final_prompt = PROMPT_MAP[prompt_type]
+                    if user_refinement:
+                        final_prompt += f"\n\n**Additional instructions:**\n{user_refinement}"
+                    
                     current_file.seek(0)
-                    traced_data = logic.get_gemini_traced_image(
-                        api_key, current_file.read(), 
-                        logic.PROMPT_MAP[prompt_type] if hasattr(logic, 'PROMPT_MAP') else "ひび割れを赤線で引いて", 
-                        model_id
-                    )
-                    # 結果を一時保存
-                    st.session_state.results_dict[filename] = {"traced_data": traced_data}
-                    st.success("Analysis completed! Please make corrections on the right side.")
+                    traced_data, raw_data = logic.get_gemini_traced_image(api_key, current_file.read(), final_prompt, model_id)
+                    st.session_state.results_dict[filename] = {"traced_data": traced_data, "raw_data": raw_data}
+                    st.success("Analysis completed!")
 
     with col_r:
         if filename in st.session_state.results_dict and st.session_state.results_dict[filename].get("traced_data"):
             res = st.session_state.results_dict[filename]
             traced_pil = Image.open(io.BytesIO(res["traced_data"]))
             
+            with st.expander("🔍 Debug: Gemini raw output"):
+                if res.get("raw_data"):
+                    st.image(Image.open(io.BytesIO(res["raw_data"])), caption="Gemini raw output (before color extraction)", use_column_width=True)
+                    st.caption("If cracks are visible here but not in the canvas above, the color threshold in `_composite_red_on_original` is filtering them out.")
+
+            st.write("Mark erroneous detection areas (Polygons)")
             canvas_result = st_canvas(
-                fill_color="rgba(255, 0, 0, 0.3)",
+                fill_color="rgba(255, 255, 255, 0.5)", # 修正: 塗りつぶしは白系が見やすい
                 stroke_width=2,
                 background_image=traced_pil,
                 update_streamlit=True,
                 height=h * (600 / w) if w > 600 else h,
                 width=600 if w > 600 else w,
-                drawing_mode="polygon",
-                key=f"canvas_{filename}", # ファイルごとにキーを変えるのがコツ
+                drawing_mode="polygon", # ユーザーの指定通り
+                key=f"canvas_{filename}",
             )
-            st.caption("Mark erroneous detection areas with your mouse")
 
-            # 描画済みマスク（アルファチャンネル）を取得するヘルパー
-            def get_exclusion_mask(image_data, target_w, target_h):
-                """canvas の image_data から除外マスクを target サイズで返す"""
-                if image_data is None:
-                    return None
-                alpha = image_data[:, :, 3]
-                if alpha.max() == 0:
-                    return None
-                return cv2.resize(alpha, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-
-            # 誤検知除外後プレビュー
+            # プレビュー処理
             if canvas_result.image_data is not None:
                 mask = get_exclusion_mask(canvas_result.image_data, w, h)
                 if mask is not None:
-                    traced_np = np.array(traced_pil.convert("RGB").resize((w, h), Image.LANCZOS))
+                    traced_np = np.array(traced_pil.convert("RGB"))
                     orig_np = np.array(pil_img.convert("RGB"))
-                    result_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
-                    st.image(Image.fromarray(result_np.astype(np.uint8)), caption="Preview after exclusion", use_column_width=True)
+                    # マスク部分だけ元画像を貼り付けて「消去」を再現
+                    preview_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
+                    st.image(preview_np, caption="Manual Exclusion Preview", use_column_width=True)
 
-            if st.button("✅ Confirm and save results for this image", use_container_width=True):
-                # 除外マスクを traced_data に適用してから YOLO 変換
+            if st.button("✅ Confirm and save", use_container_width=True):
                 traced_bytes_to_use = res["traced_data"]
+                
+                # 手動除外（消しゴム処理）の適用
                 if canvas_result.image_data is not None:
                     nparr = np.frombuffer(traced_bytes_to_use, np.uint8)
                     traced_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     th, tw = traced_cv.shape[:2]
                     mask = get_exclusion_mask(canvas_result.image_data, tw, th)
+                    
                     if mask is not None:
-                        orig_resized = np.array(pil_img.convert("RGB").resize((tw, th), Image.LANCZOS))[:, :, ::-1]
+                        # 元画像をリサイズして、マスク部分を上書き（赤線を消す）
+                        orig_cv = cv2.imdecode(np.frombuffer(current_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+                        orig_resized = cv2.resize(orig_cv, (tw, th))
                         traced_cv[mask > 0] = orig_resized[mask > 0]
+                        
                     _, enc = cv2.imencode(".jpg", traced_cv)
                     traced_bytes_to_use = enc.tobytes()
 
-                # YOLO変換実行
+                # YOLO変換実行 (引数の [] は exclusion_rects 用)
                 yolo_txt, vis_img = logic.process_yolo_segmentation(
                     traced_bytes_to_use, w, h, min_area, []
                 )
-                # 最終結果を保存
+                
                 st.session_state.results_dict[filename].update({
                     "yolo_txt": yolo_txt,
                     "vis_img": vis_img,
                     "completed": True
                 })
-                st.success(f"{filename} 's labels were saved successfully!")
+                st.success(f"Saved: {filename}")
 
-# --- 3. 一括書き出しエリア ---
+# --- 3. 一括書き出し ---
 if st.session_state.results_dict:
     st.divider()
-    st.subheader("📦 Bulk Export")
-    
     completed_count = sum(1 for r in st.session_state.results_dict.values() if r.get("completed"))
-    st.write(f"Completed Images: {completed_count} / {len(st.session_state.uploaded_files_list)}")
-
-    if st.button("📁 Download All Completed Data as ZIP", use_container_width=True):
+    if st.button(f"📁 Download ZIP ({completed_count} images)", use_container_width=True):
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for fname, data in st.session_state.results_dict.items():
                 if data.get("completed"):
-                    # ラベル保存
                     zf.writestr(f"labels/{Path(fname).stem}.txt", data["yolo_txt"])
-                    # 確認用画像保存
-                    import cv2
                     _, img_enc = cv2.imencode(".jpg", data["vis_img"])
                     zf.writestr(f"visualized/{fname}", img_enc.tobytes())
-                    # 元画像も同梱（任意）
-                    # zf.writestr(f"images/{fname}", ...) 
-
-        st.download_button(
-            label="🔥 Download ZIP",
-            data=zip_buffer.getvalue(),
-            file_name="yolo_dataset_all.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
+        st.download_button("🔥 ZIP Download", zip_buffer.getvalue(), "dataset.zip", "application/zip", use_container_width=True)

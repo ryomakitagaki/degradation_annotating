@@ -3,8 +3,6 @@ import cv2
 import numpy as np
 from google import genai
 from google.genai import types
-from PIL import Image
-import io
 
 def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
     """Gemini APIを呼び出して、劣化箇所に赤を描画した画像データを取得する"""
@@ -26,10 +24,32 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
         )
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
-                return part.inline_data.data
-        return None
+                raw_bytes = part.inline_data.data
+                composite_bytes = _composite_red_on_original(image_bytes, raw_bytes)
+                return composite_bytes, raw_bytes
+        return None, None
     except Exception as e:
         raise Exception(f"APIエラー: {e}")
+
+def _extract_red_mask(bgr_img):
+    """HSV色空間で赤系の色を検出する（JPEG圧縮による色ズレに強い）"""
+    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    # 赤はHSVで色相が0〜10と170〜180の2範囲に分かれる
+    mask1 = cv2.inRange(hsv, np.array([0,   80, 80]), np.array([10,  255, 255]))
+    mask2 = cv2.inRange(hsv, np.array([170, 80, 80]), np.array([180, 255, 255]))
+    return cv2.bitwise_or(mask1, mask2)
+
+def _composite_red_on_original(original_bytes, traced_bytes):
+    orig = cv2.imdecode(np.frombuffer(original_bytes, np.uint8), cv2.IMREAD_COLOR)
+    traced = cv2.imdecode(np.frombuffer(traced_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if traced.shape[:2] != orig.shape[:2]:
+        traced = cv2.resize(traced, (orig.shape[1], orig.shape[0]))
+    red_mask = _extract_red_mask(traced)
+    result = orig.copy()
+    result[red_mask > 0] = [0, 0, 255]
+    _, enc = cv2.imencode(".jpg", result)
+    return enc.tobytes()
+
 
 def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None):
     """赤描画画像からYOLO用テキストと可視化画像を生成する (除外領域処理付き)"""
@@ -38,10 +58,8 @@ def process_yolo_segmentation(traced_bytes, original_width, original_height, min
     nparr = np.frombuffer(traced_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 赤色領域の抽出（BGR）
-    lower_red = np.array([0, 0, 150])
-    upper_red = np.array([50, 50, 255])
-    mask = cv2.inRange(img, lower_red, upper_red)
+    # 赤色領域の抽出（HSV）
+    mask = _extract_red_mask(img)
 
     # ⚠️ 【新機能】 除外領域（矩形リスト）の処理
     # exclusion_rects: [{'left': x, 'top': y, 'width': w, 'height': h}, ...]
