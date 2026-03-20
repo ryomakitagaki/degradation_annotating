@@ -31,12 +31,13 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
     except Exception as e:
         raise Exception(f"APIエラー: {e}")
 
-def _extract_red_mask(bgr_img):
+def _extract_red_mask(bgr_img, saturation_threshold=150):
     """HSV色空間で赤系の色を検出する（JPEG圧縮による色ズレに強い）"""
     hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
     # 赤はHSVで色相が0〜10と170〜180の2範囲に分かれる
-    mask1 = cv2.inRange(hsv, np.array([0,   80, 80]), np.array([10,  255, 255]))
-    mask2 = cv2.inRange(hsv, np.array([170, 80, 80]), np.array([180, 255, 255]))
+    # 彩度閾値を高めにして，JPEGアーティファクトによる太線化を抑制
+    mask1 = cv2.inRange(hsv, np.array([0,   saturation_threshold, 80]), np.array([10,  255, 255]))
+    mask2 = cv2.inRange(hsv, np.array([170, saturation_threshold, 80]), np.array([180, 255, 255]))
     return cv2.bitwise_or(mask1, mask2)
 
 def _composite_red_on_original(original_bytes, traced_bytes):
@@ -44,7 +45,24 @@ def _composite_red_on_original(original_bytes, traced_bytes):
     traced = cv2.imdecode(np.frombuffer(traced_bytes, np.uint8), cv2.IMREAD_COLOR)
     if traced.shape[:2] != orig.shape[:2]:
         traced = cv2.resize(traced, (orig.shape[1], orig.shape[0]))
-    red_mask = _extract_red_mask(traced)
+
+    # 差分ベースの赤検出:
+    # 元画像と比較して「Rチャンネルが増加 かつ G/Bが減少」したピクセル = Geminiが描いた赤線
+    orig_f = orig.astype(np.float32)
+    traced_f = traced.astype(np.float32)
+    r_increased = (traced_f[:, :, 2] - orig_f[:, :, 2]) > 40   # Rが40以上増加
+    g_decreased = (orig_f[:, :, 1] - traced_f[:, :, 1]) > 10   # Gが減少
+    b_decreased = (orig_f[:, :, 0] - traced_f[:, :, 0]) > 10   # Bが減少
+    traced_is_red = traced_f[:, :, 2] > 150                     # tracedのR値が高い
+
+    red_mask = (r_increased & g_decreased & b_decreased & traced_is_red).astype(np.uint8) * 255
+
+    # 細線化: erosionでJPEG圧縮による滲みを除去してからdilateで少し膨張
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    red_mask = cv2.erode(red_mask, kernel, iterations=1)
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    red_mask = cv2.dilate(red_mask, kernel_dilate, iterations=1)
+
     result = orig.copy()
     result[red_mask > 0] = [0, 0, 255]
     _, enc = cv2.imencode(".jpg", result)
