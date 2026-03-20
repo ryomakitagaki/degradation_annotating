@@ -65,25 +65,13 @@ PROMPT_FOR_NANOBANANA_V1 = """
 # 欠損・はがれ
 PROMPT_FOR_NANOBANANA_V2 = """
 写真にうつる建築物の表面を解析し，建材の欠損部や剥離部を特定してください。
-欠損部や剥離部は特定した箇所の縦横のアスペクト比0.5～2.0の範囲です．
-特定した箇所のアスペクト比が0.5未満の細長いものや、2.0を超える細長いものは除外してください。
-直線的なタイルやブロックの目地，建材の稜線，異種材料の境界部分は欠損部や剥離部ではありません。
-建材表面の幾何学的な模様や陰影は欠損部や剥離部ではありません。
 特定した欠損部や剥離部の上に、鮮明な赤色を描画した画像を生成してください。
 元の画像と赤色の描画領域のみで構成された画像を返してください。
 
 """
 # その他（今回は主にエフロレッセンスを想定）
 PROMPT_FOR_NANOBANANA_V3 = """
-Analyze the surface of the building in the photograph, detect cracks, and identify the areas of white efflorescence around them.
-Efflorescence is a planar area with an aspect ratio between 0.5 and 2.0.
-Exclude elongated areas with an aspect ratio less than 0.5 or greater than 2.0.
-Linear tile or block joints, building material edges, peeling paint, and boundaries between different materials are not efflorescence.
-Geometric patterns and shading on the building material surface are irrelevant.
-Efflorescence has a white-based color, independent of the original building surface.
-Furthermore, efflorescence is a planar spread adhering to the area around the cracks.
-Generate an image with the efflorescence areas vividly colored red.
-Return an image consisting only of the original image and the red-colored areas.
+エフロレッセンスの箇所を赤く塗ってください。
 """
  
 
