@@ -124,7 +124,7 @@ if st.session_state.file_names:
             key=refine_key
         )
 
-        if st.button("🚀 Analyze / Refine with Gemini", use_container_width=True):
+        if st.button("🚀 Analyze / Refine with AI", use_container_width=True):
             if not api_key:
                 st.error("Please enter API key")
             else:
@@ -142,7 +142,7 @@ if st.session_state.file_names:
             res = st.session_state.results_dict[filename]
             traced_pil = Image.open(io.BytesIO(res["traced_data"]))
 
-            with st.expander("🔍 Gemini raw output", expanded=True):
+            with st.expander("🔍 AI raw output", expanded=True):
                 if res.get("raw_data"):
                     st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
 
