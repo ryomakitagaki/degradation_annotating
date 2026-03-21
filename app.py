@@ -56,7 +56,12 @@ V3="""
 PROMPT_MAP = {
     "Cracks": V1,
     "Chipped/Delaminated": V2,
-    "Eflorescence/Other": V3
+    "Efflorescence/Other": V3
+}
+CLASS_MAP = {
+    "Cracks":              {"id": 0, "suffix": "_cracks"},
+    "Chipped/Delaminated": {"id": 1, "suffix": "_chipped"},
+    "Efflorescence/Other": {"id": 2, "suffix": "_efflorescence"},
 }
 
 # --- 1. ファイル読み込み（サイドバーより先に実行してfile_namesを確定させる）---
@@ -74,7 +79,7 @@ with st.sidebar:
     st.header("🔑 Setting and model Loading")
     api_key = st.text_input("Gemini API Key", type="password")
     model_id = st.selectbox("Model", ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"])
-    prompt_type = st.radio("Degradation Type", ["Cracks", "Chipped/Delaminated", "Eflorescence/Other"])
+    prompt_type = st.radio("Degradation Type", ["Cracks", "Chipped/Delaminated", "Efflorescence/Other"])
     st.divider()
     st.header("📊 Current status")
     if st.session_state.file_names:
@@ -139,7 +144,10 @@ if st.session_state.file_names:
                     if user_refinement:
                         final_prompt += f"\n\n**Additional instructions:**\n{user_refinement}"
                     traced_data, raw_data = logic.get_gemini_traced_image(api_key, image_bytes, final_prompt, model_id)
-                    st.session_state.results_dict[filename] = {"traced_data": traced_data, "raw_data": raw_data}
+                    if filename not in st.session_state.results_dict:
+                        st.session_state.results_dict[filename] = {}
+                    st.session_state.results_dict[filename]["traced_data"] = traced_data
+                    st.session_state.results_dict[filename]["raw_data"] = raw_data
                     st.success("Analysis completed!")
 
     # --- 下段: AI raw output | Post-processing (canvas) ---
@@ -201,6 +209,12 @@ if st.session_state.file_names:
                 preview_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
                 st.image(preview_np, caption="Manual Exclusion Preview", use_column_width=True)
 
+        # 保存済みクラスの表示
+        saved_classes = list(st.session_state.results_dict.get(filename, {}).get("class_annotations", {}).keys())
+        if saved_classes:
+            labels_str = ", ".join(CLASS_MAP[c]["suffix"].lstrip("_") for c in saved_classes)
+            st.info(f"Saved classes for this image: **{labels_str}**")
+
         if st.button("✅ Confirm and save", use_container_width=True):
                 traced_bytes_to_use = traced_bytes_live
 
@@ -216,18 +230,23 @@ if st.session_state.file_names:
                         orig_resized = cv2.resize(orig_cv, (tw, th))
                         traced_cv[mask > 0] = orig_resized[mask > 0]
 
-                    _, enc = cv2.imencode(".jpg", traced_cv)
+                    _, enc = cv2.imencode(".png", traced_cv)
                     traced_bytes_to_use = enc.tobytes()
 
+                class_id = CLASS_MAP[prompt_type]["id"]
                 yolo_txt, vis_img = logic.process_yolo_segmentation(
-                    traced_bytes_to_use, w, h, int(min_area), []
+                    traced_bytes_to_use, w, h, int(min_area), [], class_id
                 )
-                st.session_state.results_dict[filename].update({
-                    "yolo_txt": yolo_txt,
-                    "vis_img": vis_img,
-                    "completed": True
-                })
-                st.success(f"Saved: {filename}")
+                res = st.session_state.results_dict[filename]
+                if "class_annotations" not in res:
+                    res["class_annotations"] = {}
+                if "class_vis_imgs" not in res:
+                    res["class_vis_imgs"] = {}
+                res["class_annotations"][prompt_type] = yolo_txt
+                res["class_vis_imgs"][prompt_type] = vis_img
+                res["completed"] = True
+                saved_names = ", ".join(CLASS_MAP[c]["suffix"].lstrip("_") for c in res["class_annotations"])
+                st.success(f"Saved [{prompt_type}] for {filename}  |  All saved: {saved_names}")
 
 # --- 4. 一括書き出し ---
 if st.session_state.results_dict:
@@ -238,7 +257,31 @@ if st.session_state.results_dict:
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for fname, data in st.session_state.results_dict.items():
                 if data.get("completed"):
-                    zf.writestr(f"labels/{Path(fname).stem}.txt", data["yolo_txt"])
-                    _, img_enc = cv2.imencode(".jpg", data["vis_img"])
-                    zf.writestr(f"visualized/{fname}", img_enc.tobytes())
+                    stem = Path(fname).stem
+                    ext = Path(fname).suffix
+                    # 全クラスのアノテーションを結合してラベルファイルに保存
+                    all_annotations = "\n".join(
+                        txt for txt in data.get("class_annotations", {}).values() if txt.strip()
+                    )
+                    # 元画像を images/ に保存（YOLO dataset 形式）
+                    zf.writestr(f"images/{fname}", st.session_state.file_bytes_dict[fname])
+                    # ラベルを labels/ に保存
+                    zf.writestr(f"labels/{stem}.txt", all_annotations)
+                    # クラスごとの可視化画像を visualized/ にサフィックス付きで保存
+                    for pt, vis_img in data.get("class_vis_imgs", {}).items():
+                        suffix = CLASS_MAP.get(pt, CLASS_MAP["Cracks"])["suffix"]
+                        vis_fname = f"{stem}{suffix}{ext}"
+                        _, img_enc = cv2.imencode(".jpg", vis_img)
+                        zf.writestr(f"visualized/{vis_fname}", img_enc.tobytes())
+            # data.yaml を追加
+            yaml_content = (
+                "nc: 3\n"
+                "names:\n"
+                "  - cracks\n"
+                "  - chipped_delaminated\n"
+                "  - efflorescence\n"
+                "train: images/\n"
+                "val: images/\n"
+            )
+            zf.writestr("data.yaml", yaml_content)
         st.download_button("🔥 ZIP Download", zip_buffer.getvalue(), "dataset.zip", "application/zip", use_container_width=True)

@@ -78,7 +78,7 @@ def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0):
     return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel)
 
 
-def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None):
+def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None, class_id=0):
     """赤描画画像からYOLO用テキストと可視化画像を生成する (除外領域処理付き)"""
     
     # バイト列をOpenCV形式に変換
@@ -123,6 +123,6 @@ def process_yolo_segmentation(traced_bytes, original_width, original_height, min
             nx = max(0.0, min(1.0, pt[0][0] / original_width))
             ny = max(0.0, min(1.0, pt[0][1] / original_height))
             coords.append(f"{nx:.6f} {ny:.6f}")
-        yolo_lines.append(f"0 {' '.join(coords)}")
+        yolo_lines.append(f"{class_id} {' '.join(coords)}")
 
     return "\n".join(yolo_lines), img
