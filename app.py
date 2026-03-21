@@ -164,7 +164,7 @@ if st.session_state.file_names:
                 value=0, min_value=0, key=f"min_area_{filename}"
             )
             gap_fill_kernel = st.slider(
-                "Gap fill kernel size (0=off)", 0, 100, 0,
+                "2. Gap fill kernel size (0=off)", 0, 100, 0,
                 key=f"gap_fill_{filename}",
                 help="途切れた線をつなぐ・穴を埋める。値を大きくするほど強く補完。"
             )
