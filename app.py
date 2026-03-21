@@ -3,7 +3,7 @@ import streamlit as st
 import io
 import zipfile
 import cv2
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 from pathlib import Path
 from streamlit_drawable_canvas import st_canvas
@@ -24,7 +24,7 @@ def get_exclusion_mask(image_data, target_w, target_h):
     return mask
 
 # --- UI設定 ---
-st.set_page_config(page_title="Crack Batch Labeler", layout="wide")
+st.set_page_config(page_title="Degradation Analysis & Annotation Tool", layout="wide")
 st.title("🏗️ Degradation Analysis & Annotation Tool")
 
 # --- セッション状態の初期化 ---
@@ -75,7 +75,7 @@ with st.sidebar:
     api_key = st.text_input("Gemini API Key", type="password")
     model_id = st.selectbox("Model", ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"])
     prompt_type = st.radio("Degradation Type", ["Cracks", "Chipped/Delaminated", "Eflorescence/Other"])
-    min_area = st.number_input("Minimum polygon area (px)", value=10)
+    min_area = st.number_input("Minimum polygon area for noise filtering  in Yolo output(px)", value=0)
 
     st.divider()
     st.header("📊 Current status")
@@ -98,15 +98,22 @@ with st.sidebar:
 # --- 3. 個別処理エリア ---
 if st.session_state.file_names:
     filename = st.session_state.file_names[st.session_state.file_index]
-    st.subheader(f"📂 in progress: {filename}")
+    st.subheader(f"📂 current image: {filename}")
 
     col_l, col_r = st.columns([1, 1])
     image_bytes = st.session_state.file_bytes_dict[filename]
     pil_img = Image.open(io.BytesIO(image_bytes))
     w, h = pil_img.size
 
+    # キャンバス幅を先に計算して左右の画像と揃える
+    CANVAS_PAD = 10
+    display_w = 600 if w > 600 else w
+    display_h = int(h * display_w / w)
+    canvas_total_w = display_w + 2 * CANVAS_PAD
+
     with col_l:
-        st.image(pil_img, caption="Original Image", use_column_width=True)
+        with st.expander("📷 Original Image", expanded=True):
+            st.image(pil_img, width=canvas_total_w)
 
         st.write("---")
         st.markdown("#### 🤖 Refinement Prompt")
@@ -135,26 +142,39 @@ if st.session_state.file_names:
             res = st.session_state.results_dict[filename]
             traced_pil = Image.open(io.BytesIO(res["traced_data"]))
 
-            with st.expander("🔍 Check: AI raw output"):
+            with st.expander("🔍 Gemini raw output", expanded=True):
                 if res.get("raw_data"):
-                    st.image(Image.open(io.BytesIO(res["raw_data"])), caption="Gemini raw output (before color extraction)", use_column_width=True)
-                    st.caption("If cracks are visible here but not in the canvas above, the color threshold in `_composite_red_on_original` is filtering them out.")
+                    st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
 
             st.write("Mark erroneous detection areas (Polygons)")
+
+            # 表示上の10pxが元画像何pxに相当するか
+            pad_orig = max(1, round(CANVAS_PAD * w / display_w))
+            padded_traced = ImageOps.expand(traced_pil, border=pad_orig, fill=(160, 160, 160))
+
             canvas_result = st_canvas(
                 fill_color="rgba(255, 255, 255, 0.5)",
                 stroke_width=2,
-                background_image=traced_pil,
+                background_image=padded_traced,
                 update_streamlit=True,
-                height=h * (600 / w) if w > 600 else h,
-                width=600 if w > 600 else w,
+                height=display_h + 2 * CANVAS_PAD,
+                width=display_w + 2 * CANVAS_PAD,
                 drawing_mode="polygon",
                 key=f"canvas_{filename}",
             )
 
+            def crop_canvas_padding(image_data):
+                """キャンバスのパディング分をクロップして元画像領域のみ返す"""
+                if image_data is None:
+                    return None
+                p = CANVAS_PAD
+                ch, cw = image_data.shape[:2]
+                return image_data[p:ch - p, p:cw - p]
+
             # プレビュー処理
             if canvas_result.image_data is not None:
-                mask = get_exclusion_mask(canvas_result.image_data, w, h)
+                cropped_data = crop_canvas_padding(canvas_result.image_data)
+                mask = get_exclusion_mask(cropped_data, w, h)
                 if mask is not None:
                     traced_np = np.array(traced_pil.convert("RGB"))
                     orig_np = np.array(pil_img.convert("RGB"))
@@ -168,7 +188,8 @@ if st.session_state.file_names:
                     nparr = np.frombuffer(traced_bytes_to_use, np.uint8)
                     traced_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     th, tw = traced_cv.shape[:2]
-                    mask = get_exclusion_mask(canvas_result.image_data, tw, th)
+                    cropped_data = crop_canvas_padding(canvas_result.image_data)
+                    mask = get_exclusion_mask(cropped_data, tw, th)
 
                     if mask is not None:
                         orig_cv = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)

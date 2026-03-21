@@ -31,11 +31,12 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
     except Exception as e:
         raise Exception(f"APIエラー: {e}")
 
-def _extract_red_mask(bgr_img, saturation_threshold=150):
-    """HSV色空間で赤系の色を検出する（JPEG圧縮による色ズレに強い）"""
+def _extract_red_mask(bgr_img, saturation_threshold=180):
+    """HSV色空間で赤系の色を検出する。
+    入力はPNG無劣化画像のため、赤ピクセルは彩度=255の純粋な赤。
+    saturation_thresholdは元画像の赤系ピクセル誤検出防止のために残している。"""
     hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
     # 赤はHSVで色相が0〜10と170〜180の2範囲に分かれる
-    # 彩度閾値を高めにして，JPEGアーティファクトによる太線化を抑制
     mask1 = cv2.inRange(hsv, np.array([0,   saturation_threshold, 80]), np.array([10,  255, 255]))
     mask2 = cv2.inRange(hsv, np.array([170, saturation_threshold, 80]), np.array([180, 255, 255]))
     return cv2.bitwise_or(mask1, mask2)
@@ -57,15 +58,13 @@ def _composite_red_on_original(original_bytes, traced_bytes):
 
     red_mask = (r_increased & g_decreased & b_decreased & traced_is_red).astype(np.uint8) * 255
 
-    # 細線化: erosionでJPEG圧縮による滲みを除去してからdilateで少し膨張
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-    red_mask = cv2.erode(red_mask, kernel, iterations=1)
+    # 検出領域を少し大きめにする
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     red_mask = cv2.dilate(red_mask, kernel_dilate, iterations=1)
 
     result = orig.copy()
     result[red_mask > 0] = [0, 0, 255]
-    _, enc = cv2.imencode(".jpg", result)
+    _, enc = cv2.imencode(".png", result)
     return enc.tobytes()
 
 
