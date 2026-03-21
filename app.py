@@ -75,8 +75,6 @@ with st.sidebar:
     api_key = st.text_input("Gemini API Key", type="password")
     model_id = st.selectbox("Model", ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"])
     prompt_type = st.radio("Degradation Type", ["Cracks", "Chipped/Delaminated", "Eflorescence/Other"])
-    min_area = st.number_input("Minimum polygon area for noise filtering  in Yolo output(px)", value=0)
-
     st.divider()
     st.header("📊 Current status")
     if st.session_state.file_names:
@@ -100,22 +98,31 @@ if st.session_state.file_names:
     filename = st.session_state.file_names[st.session_state.file_index]
     st.subheader(f"📂 current image: {filename}")
 
-    col_l, col_r = st.columns([1, 1])
     image_bytes = st.session_state.file_bytes_dict[filename]
     pil_img = Image.open(io.BytesIO(image_bytes))
     w, h = pil_img.size
 
-    # キャンバス幅を先に計算して左右の画像と揃える
+    # キャンバス幅を先に計算して全画像と揃える
     CANVAS_PAD = 10
     display_w = 600 if w > 600 else w
     display_h = int(h * display_w / w)
     canvas_total_w = display_w + 2 * CANVAS_PAD
 
-    with col_l:
+    def crop_canvas_padding(image_data):
+        if image_data is None:
+            return None
+        p = CANVAS_PAD
+        ch, cw = image_data.shape[:2]
+        return image_data[p:ch - p, p:cw - p]
+
+    # --- 上段: Original Image | Refinement Prompt ---
+    col_top_l, col_top_r = st.columns([1, 1])
+
+    with col_top_l:
         with st.expander("📷 Original Image", expanded=True):
             st.image(pil_img, width=canvas_total_w)
 
-        st.write("---")
+    with col_top_r:
         st.markdown("#### 🤖 Refinement Prompt")
         refine_key = f"refine_text_{filename}"
         user_refinement = st.text_area(
@@ -123,7 +130,6 @@ if st.session_state.file_names:
             placeholder="Ex: 'Ignore the vertical tile joints on the right.'",
             key=refine_key
         )
-
         if st.button("🚀 Analyze / Refine with AI", use_container_width=True):
             if not api_key:
                 st.error("Please enter API key")
@@ -132,23 +138,45 @@ if st.session_state.file_names:
                     final_prompt = PROMPT_MAP[prompt_type]
                     if user_refinement:
                         final_prompt += f"\n\n**Additional instructions:**\n{user_refinement}"
-
                     traced_data, raw_data = logic.get_gemini_traced_image(api_key, image_bytes, final_prompt, model_id)
                     st.session_state.results_dict[filename] = {"traced_data": traced_data, "raw_data": raw_data}
                     st.success("Analysis completed!")
 
-    with col_r:
-        if filename in st.session_state.results_dict and st.session_state.results_dict[filename].get("traced_data"):
-            res = st.session_state.results_dict[filename]
-            traced_pil = Image.open(io.BytesIO(res["traced_data"]))
+    # --- 下段: AI raw output | Post-processing (canvas) ---
+    if filename in st.session_state.results_dict and st.session_state.results_dict[filename].get("traced_data"):
+        res = st.session_state.results_dict[filename]
 
+        st.divider()
+
+        col_bot_l, col_bot_r = st.columns([1, 1])
+
+        with col_bot_l:
+            st.markdown("#### Post-processing")
+            # 右カラムのコントロール高さ分スペーサーを入れて下端を揃える
+            st.markdown('<div style="height: 130px"></div>', unsafe_allow_html=True)
             with st.expander("🔍 AI raw output", expanded=True):
                 if res.get("raw_data"):
                     st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
 
-            st.write("Mark erroneous detection areas (Polygons)")
+        with col_bot_r:
+            min_area = st.number_input(
+                "1. Minimum polygon area for noise filtering in YOLO output (px)",
+                value=0, min_value=0, key=f"min_area_{filename}"
+            )
+            gap_fill_kernel = st.slider(
+                "Gap fill kernel size (0=off)", 0, 100, 0,
+                key=f"gap_fill_{filename}",
+                help="途切れた線をつなぐ・穴を埋める。値を大きくするほど強く補完。"
+            )
 
-            # 表示上の10pxが元画像何pxに相当するか
+        if res.get("raw_data"):
+            traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel))
+        else:
+            traced_bytes_live = res["traced_data"]
+        traced_pil = Image.open(io.BytesIO(traced_bytes_live))
+
+        with col_bot_r:
+            st.write("3. Mark erroneous detection areas (Polygons)")
             pad_orig = max(1, round(CANVAS_PAD * w / display_w))
             padded_traced = ImageOps.expand(traced_pil, border=pad_orig, fill=(160, 160, 160))
 
@@ -163,26 +191,18 @@ if st.session_state.file_names:
                 key=f"canvas_{filename}",
             )
 
-            def crop_canvas_padding(image_data):
-                """キャンバスのパディング分をクロップして元画像領域のみ返す"""
-                if image_data is None:
-                    return None
-                p = CANVAS_PAD
-                ch, cw = image_data.shape[:2]
-                return image_data[p:ch - p, p:cw - p]
+        # --- Manual Exclusion Preview（下段全幅）---
+        if canvas_result.image_data is not None:
+            cropped_data = crop_canvas_padding(canvas_result.image_data)
+            mask = get_exclusion_mask(cropped_data, w, h)
+            if mask is not None:
+                traced_np = np.array(traced_pil.convert("RGB"))
+                orig_np = np.array(pil_img.convert("RGB"))
+                preview_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
+                st.image(preview_np, caption="Manual Exclusion Preview", use_column_width=True)
 
-            # プレビュー処理
-            if canvas_result.image_data is not None:
-                cropped_data = crop_canvas_padding(canvas_result.image_data)
-                mask = get_exclusion_mask(cropped_data, w, h)
-                if mask is not None:
-                    traced_np = np.array(traced_pil.convert("RGB"))
-                    orig_np = np.array(pil_img.convert("RGB"))
-                    preview_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
-                    st.image(preview_np, caption="Manual Exclusion Preview", use_column_width=True)
-
-            if st.button("✅ Confirm and save", use_container_width=True):
-                traced_bytes_to_use = res["traced_data"]
+        if st.button("✅ Confirm and save", use_container_width=True):
+                traced_bytes_to_use = traced_bytes_live
 
                 if canvas_result.image_data is not None:
                     nparr = np.frombuffer(traced_bytes_to_use, np.uint8)
@@ -200,9 +220,8 @@ if st.session_state.file_names:
                     traced_bytes_to_use = enc.tobytes()
 
                 yolo_txt, vis_img = logic.process_yolo_segmentation(
-                    traced_bytes_to_use, w, h, min_area, []
+                    traced_bytes_to_use, w, h, int(min_area), []
                 )
-
                 st.session_state.results_dict[filename].update({
                     "yolo_txt": yolo_txt,
                     "vis_img": vis_img,

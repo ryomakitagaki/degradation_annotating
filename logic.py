@@ -4,7 +4,7 @@ import numpy as np
 from google import genai
 from google.genai import types
 
-def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
+def get_gemini_traced_image(api_key, image_bytes, prompt, model_id, gap_fill_kernel=0):
     """Gemini APIを呼び出して、劣化箇所に赤を描画した画像データを取得する"""
     # ⚠️ (ここは以前と変更なし)
     try:
@@ -25,7 +25,7 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id):
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:
                 raw_bytes = part.inline_data.data
-                composite_bytes = _composite_red_on_original(image_bytes, raw_bytes)
+                composite_bytes = _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel)
                 return composite_bytes, raw_bytes
         return None, None
     except Exception as e:
@@ -41,7 +41,7 @@ def _extract_red_mask(bgr_img, saturation_threshold=180):
     mask2 = cv2.inRange(hsv, np.array([170, saturation_threshold, 80]), np.array([180, 255, 255]))
     return cv2.bitwise_or(mask1, mask2)
 
-def _composite_red_on_original(original_bytes, traced_bytes):
+def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0):
     orig = cv2.imdecode(np.frombuffer(original_bytes, np.uint8), cv2.IMREAD_COLOR)
     traced = cv2.imdecode(np.frombuffer(traced_bytes, np.uint8), cv2.IMREAD_COLOR)
     if traced.shape[:2] != orig.shape[:2]:
@@ -62,10 +62,20 @@ def _composite_red_on_original(original_bytes, traced_bytes):
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     red_mask = cv2.dilate(red_mask, kernel_dilate, iterations=1)
 
+    # ギャップ埋め・線つなぎ: Closing（膨張→収縮）で途切れを補完
+    if gap_fill_kernel > 1:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap_fill_kernel, gap_fill_kernel))
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
+
     result = orig.copy()
     result[red_mask > 0] = [0, 0, 255]
     _, enc = cv2.imencode(".png", result)
     return enc.tobytes()
+
+
+def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0):
+    """raw画像からgap_fill_kernelを変えて再処理する（Gemini再呼び出し不要）"""
+    return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel)
 
 
 def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None):
