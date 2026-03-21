@@ -42,16 +42,15 @@ V1="""
 写真にうつる建築物の表面を解析し，ひび割れを特定してください。
 直線的なタイルやブロックの目地，建材の稜線，塗料の剥がれ部，異種材料の境界部分はひび割れではありません。
 建材表面の幾何学的な模様や陰影はひび割れではありません。
-特定したひび割れの上に、RGB(255, 0, 0)の純粋な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
-元の画像と赤色の線のみで構成された画像を返してください。
+特定したひび割れの上に、RGB(255, 0, 0)の不透明な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
 """
 V2="""
 写真に写る建築物の表面を解析し，欠損部や剥離部をすべて特定し、
-その範囲にRGB(255, 0, 0)の純粋な赤色を描画した画像を返してください。
+その範囲にRGB(255, 0, 0)の不透明な赤色を描画した画像を返してください。
 """
 V3="""
 写真に写る建築物の表面を解析し，エフロレッセンス（白華現象，efflorescence）が見られる領域をすべて特定し、
-その範囲にRGB(255, 0, 0)の純粋な赤色で塗りつぶした画像を返してください。
+その範囲にRGB(255, 0, 0)の不透明な赤色で塗りつぶした画像を返してください。
 """
 PROMPT_MAP = {
     "Cracks": V1,
@@ -161,30 +160,39 @@ if st.session_state.file_names:
         with col_bot_l:
             st.markdown("#### Post-processing")
             # 右カラムのコントロール高さ分スペーサーを入れて下端を揃える
-            st.markdown('<div style="height: 130px"></div>', unsafe_allow_html=True)
+            st.markdown('<div style="height: 70px"></div>', unsafe_allow_html=True)
             with st.expander("🔍 AI raw output", expanded=True):
                 if res.get("raw_data"):
                     st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
 
         with col_bot_r:
-            min_area = st.number_input(
-                "1. Minimum polygon area for noise filtering in YOLO output (px)",
-                value=0, min_value=0, key=f"min_area_{filename}"
-            )
-            gap_fill_kernel = st.slider(
-                "2. Gap fill kernel size (0=off)", 0, 100, 0,
-                key=f"gap_fill_{filename}",
-                help="途切れた線をつなぐ・穴を埋める。値を大きくするほど強く補完。"
-            )
+            ctrl1, ctrl2, ctrl3 = st.columns(3)
+            with ctrl1:
+                min_area = st.number_input(
+                    "Min polygon area (px)",
+                    value=0, min_value=0, key=f"min_area_{filename}"
+                )
+            with ctrl2:
+                gap_fill_kernel = st.slider(
+                    "Gap fill kernel (0=off)", 0, 100, 0,
+                    key=f"gap_fill_{filename}",
+                    help="途切れた線をつなぐ・穴を埋める。値を大きくするほど強く補完。"
+                )
+            with ctrl3:
+                sat_thresh = st.slider(
+                    "Saturation threshold", 0, 255, 150,
+                    key=f"sat_{filename}",
+                    help="高いほど純粋な赤のみ検出。低くするとピンク・オレンジも含まれる。変更するとキャンバスに即反映。"
+                )
 
         if res.get("raw_data"):
-            traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel))
+            traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel), int(sat_thresh))
         else:
             traced_bytes_live = res["traced_data"]
         traced_pil = Image.open(io.BytesIO(traced_bytes_live))
 
         with col_bot_r:
-            st.write("3. Mark erroneous detection areas (Polygons)")
+            st.write("Mark erroneous detection areas (Polygons)")
             pad_orig = max(1, round(CANVAS_PAD * w / display_w))
             padded_traced = ImageOps.expand(traced_pil, border=pad_orig, fill=(160, 160, 160))
 
@@ -235,7 +243,7 @@ if st.session_state.file_names:
 
                 class_id = CLASS_MAP[prompt_type]["id"]
                 yolo_txt, vis_img = logic.process_yolo_segmentation(
-                    traced_bytes_to_use, w, h, int(min_area), [], class_id
+                    traced_bytes_to_use, w, h, int(min_area), [], class_id, int(sat_thresh)
                 )
                 res = st.session_state.results_dict[filename]
                 if "class_annotations" not in res:
@@ -252,7 +260,7 @@ if st.session_state.file_names:
 if st.session_state.results_dict:
     st.divider()
     completed_count = sum(1 for r in st.session_state.results_dict.values() if r.get("completed"))
-    if st.button(f"📁 Download ZIP ({completed_count} images)", use_container_width=True):
+    if st.button(f"📁 Make a ZIP ({completed_count} of data set)", use_container_width=True):
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for fname, data in st.session_state.results_dict.items():

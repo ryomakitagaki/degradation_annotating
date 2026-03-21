@@ -31,7 +31,7 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id, gap_fill_ker
     except Exception as e:
         raise Exception(f"APIエラー: {e}")
 
-def _extract_red_mask(bgr_img, saturation_threshold=180):
+def _extract_red_mask(bgr_img, saturation_threshold=150):
     """HSV色空間で赤系の色を検出する。
     入力はPNG無劣化画像のため、赤ピクセルは彩度=255の純粋な赤。
     saturation_thresholdは元画像の赤系ピクセル誤検出防止のために残している。"""
@@ -41,26 +41,14 @@ def _extract_red_mask(bgr_img, saturation_threshold=180):
     mask2 = cv2.inRange(hsv, np.array([170, saturation_threshold, 80]), np.array([180, 255, 255]))
     return cv2.bitwise_or(mask1, mask2)
 
-def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0):
+def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0, saturation_threshold=150):
     orig = cv2.imdecode(np.frombuffer(original_bytes, np.uint8), cv2.IMREAD_COLOR)
     traced = cv2.imdecode(np.frombuffer(traced_bytes, np.uint8), cv2.IMREAD_COLOR)
     if traced.shape[:2] != orig.shape[:2]:
         traced = cv2.resize(traced, (orig.shape[1], orig.shape[0]))
 
-    # 差分ベースの赤検出:
-    # 元画像と比較して「Rチャンネルが増加 かつ G/Bが減少」したピクセル = Geminiが描いた赤線
-    orig_f = orig.astype(np.float32)
-    traced_f = traced.astype(np.float32)
-    r_increased = (traced_f[:, :, 2] - orig_f[:, :, 2]) > 40   # Rが40以上増加
-    g_decreased = (orig_f[:, :, 1] - traced_f[:, :, 1]) > 10   # Gが減少
-    b_decreased = (orig_f[:, :, 0] - traced_f[:, :, 0]) > 10   # Bが減少
-    traced_is_red = traced_f[:, :, 2] > 150                     # tracedのR値が高い
-
-    red_mask = (r_increased & g_decreased & b_decreased & traced_is_red).astype(np.uint8) * 255
-
-    # 検出領域を少し大きめにする
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    red_mask = cv2.dilate(red_mask, kernel_dilate, iterations=1)
+    # HSVベースの赤検出（_extract_red_maskと同じ方式）
+    red_mask = _extract_red_mask(traced, saturation_threshold)
 
     # ギャップ埋め・線つなぎ: Closing（膨張→収縮）で途切れを補完
     if gap_fill_kernel > 1:
@@ -73,20 +61,20 @@ def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0):
     return enc.tobytes()
 
 
-def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0):
+def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0, saturation_threshold=150):
     """raw画像からgap_fill_kernelを変えて再処理する（Gemini再呼び出し不要）"""
-    return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel)
+    return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel, saturation_threshold)
 
 
-def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None, class_id=0):
+def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None, class_id=0, saturation_threshold=150):
     """赤描画画像からYOLO用テキストと可視化画像を生成する (除外領域処理付き)"""
-    
+
     # バイト列をOpenCV形式に変換
     nparr = np.frombuffer(traced_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     # 赤色領域の抽出（HSV）
-    mask = _extract_red_mask(img)
+    mask = _extract_red_mask(img, saturation_threshold)
 
     # ⚠️ 【新機能】 除外領域（矩形リスト）の処理
     # exclusion_rects: [{'left': x, 'top': y, 'width': w, 'height': h}, ...]
