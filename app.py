@@ -10,7 +10,7 @@ from streamlit_drawable_canvas import st_canvas
 
 import logic
 
-# --- ヘルパー関数 (エラー回避のため外側に定義) ---
+# --- ヘルパー関数 (エラー回避のため外側に定義.) ---
 def get_exclusion_mask(image_data, target_w, target_h):
     """canvas の image_data から除外マスクを target サイズで作成する"""
     if image_data is None:
