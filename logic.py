@@ -5,7 +5,7 @@ from google import genai
 from google.genai import types
 
 def get_gemini_traced_image(api_key, image_bytes, prompt, model_id, gap_fill_kernel=0):
-    """Gemini APIを呼び出して、劣化箇所に赤を描画した画像データを取得する"""
+    """Gemini APIを呼び出して、劣化箇所に指定色を描画した画像データを取得する"""
     # ⚠️ (ここは以前と変更なし)
     try:
         client = genai.Client(api_key=api_key)
@@ -31,50 +31,63 @@ def get_gemini_traced_image(api_key, image_bytes, prompt, model_id, gap_fill_ker
     except Exception as e:
         raise Exception(f"APIエラー: {e}")
 
-def _extract_red_mask(bgr_img, saturation_threshold=150):
-    """HSV色空間で赤系の色を検出する。
-    入力はPNG無劣化画像のため、赤ピクセルは彩度=255の純粋な赤。
-    saturation_thresholdは元画像の赤系ピクセル誤検出防止のために残している。"""
-    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
-    # 赤はHSVで色相が0〜10と170〜180の2範囲に分かれる
-    mask1 = cv2.inRange(hsv, np.array([0,   saturation_threshold, 80]), np.array([10,  255, 255]))
-    mask2 = cv2.inRange(hsv, np.array([170, saturation_threshold, 80]), np.array([180, 255, 255]))
-    return cv2.bitwise_or(mask1, mask2)
+def _extract_color_mask(bgr_img, target_rgb=(255, 0, 0), saturation_threshold=150):
+    """HSV色空間で指定色のピクセルを検出する。色相はtarget_rgbから自動計算。"""
+    # target_rgb → BGRに変換してOpenCVでHSV化
+    target_bgr = np.uint8([[[target_rgb[2], target_rgb[1], target_rgb[0]]]])
+    target_hsv = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2HSV)[0][0]
+    h = int(target_hsv[0])  # OpenCVの色相: 0〜180
 
-def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0, saturation_threshold=150):
+    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    tol = 10
+    h_low  = (h - tol) % 180
+    h_high = (h + tol) % 180
+
+    if h_low <= h_high:
+        mask = cv2.inRange(hsv, np.array([h_low,  saturation_threshold, 80]),
+                                np.array([h_high, 255, 255]))
+    else:  # 色相が0/180をまたぐ場合（赤など）
+        mask1 = cv2.inRange(hsv, np.array([h_low, saturation_threshold, 80]),
+                                 np.array([180,   255, 255]))
+        mask2 = cv2.inRange(hsv, np.array([0,     saturation_threshold, 80]),
+                                 np.array([h_high,255, 255]))
+        mask = cv2.bitwise_or(mask1, mask2)
+    return mask
+
+def _composite_red_on_original(original_bytes, traced_bytes, gap_fill_kernel=0, saturation_threshold=150, target_rgb=(255, 0, 0)):
     orig = cv2.imdecode(np.frombuffer(original_bytes, np.uint8), cv2.IMREAD_COLOR)
     traced = cv2.imdecode(np.frombuffer(traced_bytes, np.uint8), cv2.IMREAD_COLOR)
     if traced.shape[:2] != orig.shape[:2]:
         traced = cv2.resize(traced, (orig.shape[1], orig.shape[0]))
 
-    # HSVベースの赤検出（_extract_red_maskと同じ方式）
-    red_mask = _extract_red_mask(traced, saturation_threshold)
+    color_mask = _extract_color_mask(traced, target_rgb, saturation_threshold)
 
     # ギャップ埋め・線つなぎ: Closing（膨張→収縮）で途切れを補完
     if gap_fill_kernel > 1:
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap_fill_kernel, gap_fill_kernel))
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel_close)
+        color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel_close)
 
     result = orig.copy()
-    result[red_mask > 0] = [0, 0, 255]
+    # 検出色をそのままキャンバスに描画（BGR順）
+    result[color_mask > 0] = [target_rgb[2], target_rgb[1], target_rgb[0]]
     _, enc = cv2.imencode(".png", result)
     return enc.tobytes()
 
 
-def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0, saturation_threshold=150):
-    """raw画像からgap_fill_kernelを変えて再処理する（Gemini再呼び出し不要）"""
-    return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel, saturation_threshold)
+def reprocess_from_raw(image_bytes, raw_bytes, gap_fill_kernel=0, saturation_threshold=150, target_rgb=(255, 0, 0)):
+    """raw画像からパラメータを変えて再処理する（Gemini再呼び出し不要）"""
+    return _composite_red_on_original(image_bytes, raw_bytes, gap_fill_kernel, saturation_threshold, target_rgb)
 
 
-def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None, class_id=0, saturation_threshold=150):
-    """赤描画画像からYOLO用テキストと可視化画像を生成する (除外領域処理付き)"""
+def process_yolo_segmentation(traced_bytes, original_width, original_height, min_area_px=10, exclusion_rects=None, class_id=0, saturation_threshold=150, target_rgb=(255, 0, 0)):
+    """指定色の描画画像からYOLO用テキストと可視化画像を生成する (除外領域処理付き)"""
 
     # バイト列をOpenCV形式に変換
     nparr = np.frombuffer(traced_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # 赤色領域の抽出（HSV）
-    mask = _extract_red_mask(img, saturation_threshold)
+    # 色領域の抽出（HSV）
+    mask = _extract_color_mask(img, target_rgb, saturation_threshold)
 
     # ⚠️ 【新機能】 除外領域（矩形リスト）の処理
     # exclusion_rects: [{'left': x, 'top': y, 'width': w, 'height': h}, ...]

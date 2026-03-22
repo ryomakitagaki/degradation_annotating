@@ -36,21 +36,23 @@ if 'file_names' not in st.session_state:
     st.session_state.file_names = []
 if 'file_bytes_dict' not in st.session_state:
     st.session_state.file_bytes_dict = {}
+if 'zoom_orig' not in st.session_state:
+    st.session_state.zoom_orig = False
 
 # --- 基本プロンプト定義 ---
 V1="""
 写真にうつる建築物の表面を解析し，ひび割れを特定してください。
 直線的なタイルやブロックの目地，建材の稜線，塗料の剥がれ部，異種材料の境界部分はひび割れではありません。
 建材表面の幾何学的な模様や陰影はひび割れではありません。
-特定したひび割れの上に、RGB(255, 0, 0)の不透明な赤色の線を，ひび割れの太さに応じて描画した画像を生成してください。
+特定したひび割れの上に、RGB(255, 0, 0)の不透明な線を，描画した画像を生成してください。
 """
 V2="""
 写真に写る建築物の表面を解析し，欠損部や剥離部をすべて特定し、
-その範囲にRGB(255, 0, 0)の不透明な赤色を描画した画像を返してください。
+その範囲にRGB(255, 0, 0)の不透明な描画した画像を返してください。
 """
 V3="""
 写真に写る建築物の表面を解析し，エフロレッセンス（白華現象，efflorescence）が見られる領域をすべて特定し、
-その範囲にRGB(255, 0, 0)の不透明な赤色で塗りつぶした画像を返してください。
+その範囲にRGB(255, 0, 0)の不透明な色で塗りつぶした画像を返してください。
 """
 PROMPT_MAP = {
     "Cracks": V1,
@@ -125,6 +127,14 @@ if st.session_state.file_names:
     with col_top_l:
         with st.expander("📷 Original Image", expanded=True):
             st.image(pil_img, width=canvas_total_w)
+            if st.button("🔍 Zoom", key=f"zoom_btn_{filename}"):
+                st.session_state.zoom_orig = not st.session_state.zoom_orig
+
+    if st.session_state.zoom_orig:
+        st.image(pil_img, caption=filename, use_column_width=True)
+        if st.button("✕ Close zoom", key=f"zoom_close_{filename}"):
+            st.session_state.zoom_orig = False
+            st.rerun()
 
     with col_top_r:
         st.markdown("#### 🤖 Refinement Prompt")
@@ -134,12 +144,20 @@ if st.session_state.file_names:
             placeholder="Ex: 'Ignore the vertical tile joints on the right.'",
             key=refine_key
         )
+        picked_hex = st.color_picker("Annotation color", "#FF0000", key=f"color_{filename}")
+        pr = int(picked_hex[1:3], 16)
+        pg = int(picked_hex[3:5], 16)
+        pb = int(picked_hex[5:7], 16)
+        target_rgb = (pr, pg, pb)
+
         if st.button("🚀 Analyze / Refine with AI", use_container_width=True):
             if not api_key:
                 st.error("Please enter API key")
             else:
                 with st.spinner("Analyzing..."):
-                    final_prompt = PROMPT_MAP[prompt_type]
+                    final_prompt = PROMPT_MAP[prompt_type].replace(
+                        "RGB(255, 0, 0)", f"RGB({pr}, {pg}, {pb})"
+                    )
                     if user_refinement:
                         final_prompt += f"\n\n**Additional instructions:**\n{user_refinement}"
                     traced_data, raw_data = logic.get_gemini_traced_image(api_key, image_bytes, final_prompt, model_id)
@@ -147,6 +165,7 @@ if st.session_state.file_names:
                         st.session_state.results_dict[filename] = {}
                     st.session_state.results_dict[filename]["traced_data"] = traced_data
                     st.session_state.results_dict[filename]["raw_data"] = raw_data
+                    st.session_state.results_dict[filename]["target_rgb"] = target_rgb
                     st.success("Analysis completed!")
 
     # --- 下段: AI raw output | Post-processing (canvas) ---
@@ -159,8 +178,8 @@ if st.session_state.file_names:
 
         with col_bot_l:
             st.markdown("#### Post-processing")
-            # 右カラムのコントロール高さ分スペーサーを入れて下端を揃える
-            st.markdown('<div style="height: 70px"></div>', unsafe_allow_html=True)
+            # 右カラムのコントロール高さ分スペーサー（余白）を入れて下端を揃える
+            st.markdown('<div style="height: 40px"></div>', unsafe_allow_html=True)
             with st.expander("🔍 AI raw output", expanded=True):
                 if res.get("raw_data"):
                     st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
@@ -182,11 +201,12 @@ if st.session_state.file_names:
                 sat_thresh = st.slider(
                     "Saturation threshold", 0, 255, 150,
                     key=f"sat_{filename}",
-                    help="高いほど純粋な赤のみ検出。低くするとピンク・オレンジも含まれる。変更するとキャンバスに即反映。"
+                    help="高いほど純粋な指定色のみ検出。低くするとピンク・オレンジも含まれる。変更するとキャンバスに即反映。"
                 )
 
+        saved_target_rgb = res.get("target_rgb", (255, 0, 0))
         if res.get("raw_data"):
-            traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel), int(sat_thresh))
+            traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel), int(sat_thresh), saved_target_rgb)
         else:
             traced_bytes_live = res["traced_data"]
         traced_pil = Image.open(io.BytesIO(traced_bytes_live))
@@ -243,7 +263,7 @@ if st.session_state.file_names:
 
                 class_id = CLASS_MAP[prompt_type]["id"]
                 yolo_txt, vis_img = logic.process_yolo_segmentation(
-                    traced_bytes_to_use, w, h, int(min_area), [], class_id, int(sat_thresh)
+                    traced_bytes_to_use, w, h, int(min_area), [], class_id, int(sat_thresh), saved_target_rgb
                 )
                 res = st.session_state.results_dict[filename]
                 if "class_annotations" not in res:
