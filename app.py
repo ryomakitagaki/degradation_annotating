@@ -11,6 +11,7 @@ from pathlib import Path
 # streamlit-drawable-canvas が使う内部API互換パッチ
 # 旧: image_to_url(image, width:int, clamp, channels, fmt, key)
 # 新: image_to_url(image, layout_config:LayoutConfig, clamp, channels, fmt, key)
+# このあたり画像読み込みー出力を堅牢化するために、streamlitのバージョン差異を吸収する互換関数を定義している。
 import streamlit.elements.image as _st_img_mod
 if not hasattr(_st_img_mod, "image_to_url"):
     try:
