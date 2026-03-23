@@ -2,10 +2,30 @@
 import streamlit as st
 import io
 import zipfile
+import base64
 import cv2
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 import numpy as np
 from pathlib import Path
+# streamlit-drawable-canvas が使う内部API互換パッチ
+# 旧: image_to_url(image, width:int, clamp, channels, fmt, key)
+# 新: image_to_url(image, layout_config:LayoutConfig, clamp, channels, fmt, key)
+import streamlit.elements.image as _st_img_mod
+if not hasattr(_st_img_mod, "image_to_url"):
+    try:
+        from streamlit.elements.lib.image_utils import image_to_url as _new_image_to_url
+        from streamlit.elements.lib.layout_utils import LayoutConfig as _LayoutConfig
+
+        def _compat_image_to_url(image, width_or_config, *args, **kwargs):
+            if isinstance(width_or_config, int):
+                width_or_config = _LayoutConfig(width=width_or_config)
+            return _new_image_to_url(image, width_or_config, *args, **kwargs)
+
+        _st_img_mod.image_to_url = _compat_image_to_url
+    except ImportError:
+        pass
+
 from streamlit_drawable_canvas import st_canvas
 
 import logic
@@ -105,8 +125,14 @@ if st.session_state.file_names:
     st.subheader(f"📂 current image: {filename}")
 
     image_bytes = st.session_state.file_bytes_dict[filename]
-    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    _cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    img_np = cv2.cvtColor(_cv_img, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(img_np)
     w, h = pil_img.size
+    _img_buf = io.BytesIO()
+    pil_img.save(_img_buf, format="PNG")
+    _img_b64 = base64.b64encode(_img_buf.getvalue()).decode()
 
     # キャンバス幅を先に計算して全画像と揃える
     CANVAS_PAD = 10
@@ -126,12 +152,19 @@ if st.session_state.file_names:
 
     with col_top_l:
         with st.expander("📷 Original Image", expanded=True):
-            st.image(pil_img, width=canvas_total_w)
+            st.markdown(
+                f'<img src="data:image/png;base64,{_img_b64}" width="{canvas_total_w}">',
+                unsafe_allow_html=True,
+            )
             if st.button("🔍 Zoom", key=f"zoom_btn_{filename}"):
                 st.session_state.zoom_orig = not st.session_state.zoom_orig
 
     if st.session_state.zoom_orig:
-        st.image(pil_img, caption=filename, use_column_width=True)
+        st.markdown(
+            f'<img src="data:image/png;base64,{_img_b64}" style="width:100%">',
+            unsafe_allow_html=True,
+        )
+        st.caption(filename)
         if st.button("✕ Close zoom", key=f"zoom_close_{filename}"):
             st.session_state.zoom_orig = False
             st.rerun()
@@ -182,7 +215,11 @@ if st.session_state.file_names:
             st.markdown('<div style="height: 40px"></div>', unsafe_allow_html=True)
             with st.expander("🔍 AI raw output", expanded=True):
                 if res.get("raw_data"):
-                    st.image(Image.open(io.BytesIO(res["raw_data"])), width=canvas_total_w)
+                    _raw_b64 = base64.b64encode(res["raw_data"]).decode()
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{_raw_b64}" width="{canvas_total_w}">',
+                        unsafe_allow_html=True,
+                    )
 
         with col_bot_r:
             ctrl1, ctrl2, ctrl3 = st.columns(3)
@@ -209,7 +246,8 @@ if st.session_state.file_names:
             traced_bytes_live = logic.reprocess_from_raw(image_bytes, res["raw_data"], int(gap_fill_kernel), int(sat_thresh), saved_target_rgb)
         else:
             traced_bytes_live = res["traced_data"]
-        traced_pil = Image.open(io.BytesIO(traced_bytes_live))
+        _traced_cv = cv2.imdecode(np.frombuffer(traced_bytes_live, np.uint8), cv2.IMREAD_COLOR)
+        traced_pil = Image.fromarray(cv2.cvtColor(_traced_cv, cv2.COLOR_BGR2RGB))
 
         with col_bot_r:
             st.write("Mark erroneous detection areas (Polygons)")
@@ -233,9 +271,15 @@ if st.session_state.file_names:
             mask = get_exclusion_mask(cropped_data, w, h)
             if mask is not None:
                 traced_np = np.array(traced_pil.convert("RGB"))
-                orig_np = np.array(pil_img.convert("RGB"))
+                orig_np = img_np.copy()
                 preview_np = np.where(mask[:, :, np.newaxis] > 0, orig_np, traced_np)
-                st.image(preview_np, caption="Manual Exclusion Preview", use_column_width=True)
+                _, _prev_buf = cv2.imencode(".png", cv2.cvtColor(preview_np.astype(np.uint8), cv2.COLOR_RGB2BGR))
+                _prev_b64 = base64.b64encode(_prev_buf.tobytes()).decode()
+                st.markdown(
+                    f'<img src="data:image/png;base64,{_prev_b64}" style="width:100%">',
+                    unsafe_allow_html=True,
+                )
+                st.caption("Manual Exclusion Preview")
 
         # 保存済みクラスの表示
         saved_classes = list(st.session_state.results_dict.get(filename, {}).get("class_annotations", {}).keys())

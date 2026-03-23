@@ -1,6 +1,6 @@
-streamlit==1.28.2
+streamlit>=1.29.0
 google-genai
 opencv-python-headless
 numpy
-Pillow
+Pillow==9.5.0
 streamlit-drawable-canvas
