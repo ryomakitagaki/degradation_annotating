@@ -105,7 +105,7 @@ if st.session_state.file_names:
     st.subheader(f"📂 current image: {filename}")
 
     image_bytes = st.session_state.file_bytes_dict[filename]
-    pil_img = Image.open(io.BytesIO(image_bytes))
+    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     w, h = pil_img.size
 
     # キャンバス幅を先に計算して全画像と揃える
